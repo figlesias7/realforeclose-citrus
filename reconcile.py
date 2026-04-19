@@ -77,16 +77,34 @@ def append_event(timestamp, case_no, action, row):
 
 def normalize_row(row):
     return {
-        "Auction Date": row.get("Auction Date", ""),
-        "Property Address": row.get("Property Address", ""),
-        "Final Judgment": row.get("Final Judgment", ""),
-        "Assessed Value": row.get("Assessed Value", ""),
-        "Plaintiff Max Bid": row.get("Plaintiff Max Bid", ""),
-        "Case #": row.get("Case #", ""),
-        "Parcel ID": row.get("Parcel ID", ""),
-        "Case Link": row.get("Case Link", ""),
-        "Parcel Link": row.get("Parcel Link", ""),
+        "Auction Date": (row.get("Auction Date", "") or "").strip(),
+        "Property Address": (row.get("Property Address", "") or "").strip(),
+        "Final Judgment": (row.get("Final Judgment", "") or "").strip(),
+        "Assessed Value": (row.get("Assessed Value", "") or "").strip(),
+        "Plaintiff Max Bid": (row.get("Plaintiff Max Bid", "") or "").strip(),
+        "Case #": (row.get("Case #", "") or "").strip(),
+        "Parcel ID": (row.get("Parcel ID", "") or "").strip(),
+        "Case Link": (row.get("Case Link", "") or "").strip(),
+        "Parcel Link": (row.get("Parcel Link", "") or "").strip(),
     }
+
+
+def row_key(row):
+    parcel_id = (row.get("Parcel ID") or "").strip()
+    case_no = (row.get("Case #") or "").strip()
+    auction_date = (row.get("Auction Date") or "").strip()
+    address = (row.get("Property Address") or "").strip()
+
+    if parcel_id:
+        return ("PARCEL", parcel_id, auction_date)
+
+    if case_no:
+        return ("CASE", case_no, auction_date, address)
+
+    if address or auction_date:
+        return ("ADDR", address, auction_date)
+
+    return None
 
 
 def build_html(new_today_rows, active_rows, closed_rows):
@@ -215,19 +233,28 @@ def main():
     latest_rows = [normalize_row(r) for r in read_csv(snapshot)]
     previous_rows = [normalize_row(r) for r in read_csv(ACTIVE_FILE)]
 
-    latest_by_case = {r["Case #"]: r for r in latest_rows if r.get("Case #")}
-    previous_by_case = {r["Case #"]: r for r in previous_rows if r.get("Case #")}
+    latest_by_key = {}
+    for row in latest_rows:
+        key = row_key(row)
+        if key:
+            latest_by_key[key] = row
+
+    previous_by_key = {}
+    for row in previous_rows:
+        key = row_key(row)
+        if key:
+            previous_by_key[key] = row
 
     timestamp = datetime.now().isoformat(timespec="seconds")
     today_str = datetime.now().strftime("%Y-%m-%d")
 
-    for case_no, row in latest_by_case.items():
-        if case_no not in previous_by_case:
-            append_event(timestamp, case_no, "NEW", row)
+    for key, row in latest_by_key.items():
+        if key not in previous_by_key:
+            append_event(timestamp, row.get("Case #", ""), "NEW", row)
 
-    for case_no, row in previous_by_case.items():
-        if case_no not in latest_by_case:
-            append_event(timestamp, case_no, "CLOSED", row)
+    for key, row in previous_by_key.items():
+        if key not in latest_by_key:
+            append_event(timestamp, row.get("Case #", ""), "CLOSED", row)
 
     fieldnames = [
         "Auction Date",
@@ -240,25 +267,28 @@ def main():
         "Case Link",
         "Parcel Link",
     ]
-    write_csv(ACTIVE_FILE, list(latest_by_case.values()), fieldnames)
+    write_csv(ACTIVE_FILE, list(latest_by_key.values()), fieldnames)
 
     event_rows = read_csv(EVENT_FILE)
     event_rows = sorted(event_rows, key=lambda r: r.get("Timestamp", ""), reverse=True)
 
-    new_today_case_nos = {
-        r.get("Case #", "")
-        for r in event_rows
-        if r.get("Action") == "NEW" and r.get("Timestamp", "").startswith(today_str)
-    }
-    new_today_rows = [
-        latest_by_case[case_no]
-        for case_no in new_today_case_nos
-        if case_no in latest_by_case
-    ]
-    new_today_rows = sorted(new_today_rows, key=lambda r: (r.get("Auction Date", ""), r.get("Case #", "")))
+    new_today_rows = []
+    seen_new_today = set()
+    for event_row in event_rows:
+        if event_row.get("Action") != "NEW":
+            continue
+        if not event_row.get("Timestamp", "").startswith(today_str):
+            continue
 
-    active_rows = list(latest_by_case.values())
-    active_rows = sorted(active_rows, key=lambda r: (r.get("Auction Date", ""), r.get("Case #", "")))
+        event_key = row_key(event_row)
+        if event_key and event_key in latest_by_key and event_key not in seen_new_today:
+            new_today_rows.append(latest_by_key[event_key])
+            seen_new_today.add(event_key)
+
+    new_today_rows = sorted(new_today_rows, key=lambda r: (r.get("Auction Date", ""), r.get("Case #", ""), r.get("Parcel ID", "")))
+
+    active_rows = list(latest_by_key.values())
+    active_rows = sorted(active_rows, key=lambda r: (r.get("Auction Date", ""), r.get("Case #", ""), r.get("Parcel ID", "")))
 
     closed_rows = [
         r for r in event_rows
@@ -269,8 +299,8 @@ def main():
 
     print(f"Snapshot: {os.path.basename(snapshot)}")
     print(f"Active cases: {len(active_rows)}")
-    print(f"New cases this run: {sum(1 for c in latest_by_case if c not in previous_by_case)}")
-    print(f"Closed cases this run: {sum(1 for c in previous_by_case if c not in latest_by_case)}")
+    print(f"New cases this run: {sum(1 for k in latest_by_key if k not in previous_by_key)}")
+    print(f"Closed cases this run: {sum(1 for k in previous_by_key if k not in latest_by_key)}")
 
 
 if __name__ == "__main__":
