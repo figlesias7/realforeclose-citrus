@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 from html import escape
 
-BASE_DOMAIN = "https://orange.realforeclose.com/"
+BASE_DOMAIN = "https://citrus.realforeclose.com/"
 CALENDAR_URL = f"{BASE_DOMAIN}/index.cfm?zaction=USER&zmethod=CALENDAR"
 
 DATA_DIR = "data"
