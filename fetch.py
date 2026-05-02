@@ -6,6 +6,7 @@ import os
 import re
 from datetime import datetime
 from html import escape
+from urllib.parse import quote
 
 BASE_DOMAIN = "https://citrus.realforeclose.com/"
 CALENDAR_URL = f"{BASE_DOMAIN}/index.cfm?zaction=USER&zmethod=CALENDAR"
@@ -80,54 +81,64 @@ def extract_auctions_waiting(text: str) -> str:
     return section
 
 
+def extract_field(block: str, label: str, next_labels: list[str]) -> str:
+    """Extract a labeled value until the next known label, preserving spaces inside values."""
+    next_pattern = "|".join(re.escape(x) for x in next_labels)
+    pattern = re.compile(
+        rf"{re.escape(label)}\s*(?P<value>.*?)(?=\s*(?:{next_pattern})\s*|$)",
+        re.DOTALL | re.IGNORECASE,
+    )
+    match = pattern.search(block)
+    return clean_text(match.group("value")) if match else ""
+
+
 def parse_waiting_records(section_text: str) -> list[dict]:
     if not section_text:
         return []
 
-    pattern = re.compile(
-        r"Auction Starts\s*(?P<auction_date>\d{2}/\d{2}/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M\s+ET).*?"
-        r"Case #:\s*(?P<case>\S+).*?"
-        r"Final Judgment Amount:\s*(?P<judgment>\$[\d,]+\.\d{2}|Hidden).*?"
-        r"Parcel ID:\s*(?P<parcel>\S+).*?"
-        r"Property Address:\s*(?P<address>.*?)"
-        r"Assessed Value:\s*(?P<assessed>\$[\d,]+\.\d{2}|Hidden).*?"
-        r"Plaintiff Max Bid:\s*(?P<max_bid>\$[\d,]+\.\d{2}|Hidden)",
-        re.DOTALL | re.IGNORECASE,
-    )
+    labels = [
+        "Auction Type:",
+        "Case #:",
+        "Final Judgment Amount:",
+        "Parcel ID:",
+        "Property Address:",
+        "Assessed Value:",
+        "Plaintiff Max Bid:",
+        "Auction Starts",
+    ]
 
+    blocks = re.split(r"(?=Auction Starts\s*\d{2}/\d{2}/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M\s+ET)", section_text, flags=re.IGNORECASE)
     rows = []
 
-    for match in pattern.finditer(section_text):
-        address = clean_text(match.group("address"))
+    for block in blocks:
+        block = block.strip()
+        if not block or "Case #:" not in block:
+            continue
 
-        cut_markers = [
-            "Plaintiff Max Bid:",
-            "Auction Starts",
-            "Auction Type:",
-            "Case #:",
-            "Final Judgment Amount:",
-            "Parcel ID:",
-            "Property Address:",
-            "Assessed Value:",
-        ]
-        for marker in cut_markers:
-            pos = address.find(marker)
-            if pos != -1:
-                address = address[:pos].strip()
+        auction_match = re.search(
+            r"Auction Starts\s*(?P<auction_date>\d{2}/\d{2}/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M\s+ET)",
+            block,
+            re.IGNORECASE,
+        )
+        if not auction_match:
+            continue
 
-        case_no = clean_text(match.group("case"))
-        parcel_id = clean_text(match.group("parcel"))
+        case_no = extract_field(block, "Case #:", labels)
+        parcel_id = extract_field(block, "Parcel ID:", labels)
+
+        if not case_no:
+            continue
 
         rows.append({
-            "Auction Date": clean_text(match.group("auction_date")),
-            "Property Address": address,
-            "Final Judgment": clean_text(match.group("judgment")),
-            "Assessed Value": clean_text(match.group("assessed")),
-            "Plaintiff Max Bid": clean_text(match.group("max_bid")),
+            "Auction Date": clean_text(auction_match.group("auction_date")),
+            "Property Address": extract_field(block, "Property Address:", labels),
+            "Final Judgment": extract_field(block, "Final Judgment Amount:", labels),
+            "Assessed Value": extract_field(block, "Assessed Value:", labels),
+            "Plaintiff Max Bid": extract_field(block, "Plaintiff Max Bid:", labels),
             "Case #": case_no,
             "Parcel ID": parcel_id,
-            "Case Link": f"{BASE_DOMAIN}/index.cfm?zaction=auction&zmethod=details&AID={case_no}&bypassPage=1",
-            "Parcel Link": f"https://pcpao.gov/Parcel-Details/{parcel_id}",
+            "Case Link": f"{BASE_DOMAIN}/index.cfm?zaction=auction&zmethod=details&AID={quote(case_no)}&bypassPage=1",
+            "Parcel Link": f"https://pcpao.gov/Parcel-Details/{quote(parcel_id)}" if parcel_id else "",
         })
 
     return rows
