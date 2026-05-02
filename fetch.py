@@ -81,89 +81,100 @@ def extract_auctions_waiting(text: str) -> str:
     return section
 
 
-def extract_field(block: str, label: str, next_labels: list[str]) -> str:
-    """Extract a labeled value until the next known label, preserving spaces inside values."""
-    next_pattern = "|".join(re.escape(x) for x in next_labels)
-    pattern = re.compile(
-        rf"{re.escape(label)}\s*(?P<value>.*?)(?=\s*(?:{next_pattern})\s*|$)",
-        re.DOTALL | re.IGNORECASE,
-    )
-    match = pattern.search(block)
-    return clean_text(match.group("value")) if match else ""
-
-
 def clean_money_field(value: str) -> str:
     value = clean_text(value)
-    value = re.sub(r"\s+page\s+of\s+\d+\s*$", "", value, flags=re.IGNORECASE).strip()
-    return value
+    if not value:
+        return ""
+    if re.search(r"\bHidden\b", value, flags=re.IGNORECASE):
+        return "Hidden"
+    money = re.search(r"\$\s*\d[\d,]*\.\d{2}", value)
+    return money.group(0).replace("$ ", "$") if money else ""
+
+
+def clean_case_field(value: str) -> str:
+    value = clean_text(value)
+    m = re.search(r"\b\d{4}\s+[A-Z]{1,3}\s+\d{3,8}\s*[A-Z]?\b", value, flags=re.IGNORECASE)
+    return clean_text(m.group(0)).upper() if m else value.upper()
 
 
 def clean_parcel_field(value: str) -> str:
     value = clean_text(value)
-    value = re.sub(r"\s+Property Appraiser\s*$", "", value, flags=re.IGNORECASE).strip()
-    if value.lower() == "property appraiser":
-        return ""
-    return value
+    value = re.sub(r"\bProperty Appraiser\b.*$", "", value, flags=re.IGNORECASE).strip()
+    if re.search(r"multiple\s+parcels", value, flags=re.IGNORECASE):
+        return "MULTIPLE PARCELS"
+    m = re.search(r"\b\d{5,}\b", value)
+    return m.group(0) if m else ""
 
 
 def clean_address_field(value: str) -> str:
     value = clean_text(value)
-    value = re.sub(r"\s+Property Appraiser\s*$", "", value, flags=re.IGNORECASE).strip()
+    value = re.sub(r"\bProperty Appraiser\b.*$", "", value, flags=re.IGNORECASE).strip()
+    value = re.sub(r"\bAssessed Value:.*$", "", value, flags=re.IGNORECASE).strip()
     return value
+
+
+def get_between(text: str, start_label: str, end_labels: list[str]) -> str:
+    """Get everything after start_label until the first later label."""
+    start_re = re.search(re.escape(start_label), text, flags=re.IGNORECASE)
+    if not start_re:
+        return ""
+    start = start_re.end()
+    end = len(text)
+    for label in end_labels:
+        m = re.search(re.escape(label), text[start:], flags=re.IGNORECASE)
+        if m:
+            end = min(end, start + m.start())
+    return clean_text(text[start:end])
+
+
+def parse_block(block: str) -> dict | None:
+    auction_match = re.search(
+        r"Auction Starts\s*(?P<auction_date>\d{2}/\d{2}/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M\s+ET)",
+        block,
+        re.IGNORECASE,
+    )
+    if not auction_match or "Case #:" not in block:
+        return None
+
+    case_no = clean_case_field(get_between(block, "Case #:", ["Final Judgment Amount:", "Parcel ID:", "Property Address:", "Assessed Value:", "Plaintiff Max Bid:", "Auction Starts"]))
+    final_judgment = clean_money_field(get_between(block, "Final Judgment Amount:", ["Parcel ID:", "Property Address:", "Assessed Value:", "Plaintiff Max Bid:", "Auction Starts"]))
+    parcel_id = clean_parcel_field(get_between(block, "Parcel ID:", ["Property Address:", "Assessed Value:", "Plaintiff Max Bid:", "Auction Starts"]))
+    address = clean_address_field(get_between(block, "Property Address:", ["Assessed Value:", "Plaintiff Max Bid:", "Auction Starts"]))
+    assessed_value = clean_money_field(get_between(block, "Assessed Value:", ["Plaintiff Max Bid:", "Auction Starts"]))
+    max_bid = clean_money_field(get_between(block, "Plaintiff Max Bid:", ["Auction Starts"]))
+
+    if not case_no:
+        return None
+
+    return {
+        "Auction Date": clean_text(auction_match.group("auction_date")),
+        "Property Address": address,
+        "Final Judgment": final_judgment,
+        "Assessed Value": assessed_value,
+        "Plaintiff Max Bid": max_bid,
+        "Case #": case_no,
+        "Parcel ID": parcel_id,
+        "Case Link": f"{BASE_DOMAIN}/index.cfm?zaction=auction&zmethod=details&AID={quote(case_no, safe='')}&bypassPage=1",
+        "Parcel Link": f"https://pcpao.gov/Parcel-Details/{quote(parcel_id, safe='')}" if parcel_id and parcel_id.upper() != "MULTIPLE PARCELS" else "",
+    }
 
 
 def parse_waiting_records(section_text: str) -> list[dict]:
     if not section_text:
         return []
 
-    labels = [
-        "Auction Type:",
-        "Case #:",
-        "Final Judgment Amount:",
-        "Parcel ID:",
-        "Property Address:",
-        "Assessed Value:",
-        "Plaintiff Max Bid:",
-        "Auction Starts",
-    ]
+    # Split each auction card by the next Auction Starts line.
+    blocks = re.split(
+        r"(?=Auction Starts\s*\d{2}/\d{2}/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M\s+ET)",
+        section_text,
+        flags=re.IGNORECASE,
+    )
 
-    blocks = re.split(r"(?=Auction Starts\s*\d{2}/\d{2}/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M\s+ET)", section_text, flags=re.IGNORECASE)
     rows = []
-
     for block in blocks:
-        block = block.strip()
-        if not block or "Case #:" not in block:
-            continue
-
-        auction_match = re.search(
-            r"Auction Starts\s*(?P<auction_date>\d{2}/\d{2}/\d{4}\s+\d{1,2}:\d{2}\s+[AP]M\s+ET)",
-            block,
-            re.IGNORECASE,
-        )
-        if not auction_match:
-            continue
-
-        case_no = extract_field(block, "Case #:", labels)
-        parcel_id = clean_parcel_field(extract_field(block, "Parcel ID:", labels))
-        address = clean_address_field(extract_field(block, "Property Address:", labels))
-        final_judgment = clean_money_field(extract_field(block, "Final Judgment Amount:", labels))
-        assessed_value = clean_money_field(extract_field(block, "Assessed Value:", labels))
-        max_bid = clean_money_field(extract_field(block, "Plaintiff Max Bid:", labels))
-
-        if not case_no:
-            continue
-
-        rows.append({
-            "Auction Date": clean_text(auction_match.group("auction_date")),
-            "Property Address": address,
-            "Final Judgment": final_judgment,
-            "Assessed Value": assessed_value,
-            "Plaintiff Max Bid": max_bid,
-            "Case #": case_no,
-            "Parcel ID": parcel_id,
-            "Case Link": f"{BASE_DOMAIN}/index.cfm?zaction=auction&zmethod=details&AID={quote(case_no, safe='')}&bypassPage=1",
-            "Parcel Link": f"https://pcpao.gov/Parcel-Details/{quote(parcel_id, safe='')}" if parcel_id and parcel_id.upper() != "MULTIPLE PARCELS" else "",
-        })
+        row = parse_block(block.strip())
+        if row:
+            rows.append(row)
 
     return rows
 
@@ -204,7 +215,13 @@ def read_csv_rows(path: str) -> list[dict]:
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            rows.append(dict(row))
+            row = dict(row)
+            row["Final Judgment"] = clean_money_field(row.get("Final Judgment", ""))
+            row["Assessed Value"] = clean_money_field(row.get("Assessed Value", ""))
+            row["Plaintiff Max Bid"] = clean_money_field(row.get("Plaintiff Max Bid", ""))
+            row["Parcel ID"] = clean_parcel_field(row.get("Parcel ID", "")) or row.get("Parcel ID", "")
+            row["Case #"] = clean_case_field(row.get("Case #", ""))
+            rows.append(row)
     return rows
 
 
