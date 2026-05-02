@@ -92,6 +92,26 @@ def extract_field(block: str, label: str, next_labels: list[str]) -> str:
     return clean_text(match.group("value")) if match else ""
 
 
+def clean_money_field(value: str) -> str:
+    value = clean_text(value)
+    value = re.sub(r"\s+page\s+of\s+\d+\s*$", "", value, flags=re.IGNORECASE).strip()
+    return value
+
+
+def clean_parcel_field(value: str) -> str:
+    value = clean_text(value)
+    value = re.sub(r"\s+Property Appraiser\s*$", "", value, flags=re.IGNORECASE).strip()
+    if value.lower() == "property appraiser":
+        return ""
+    return value
+
+
+def clean_address_field(value: str) -> str:
+    value = clean_text(value)
+    value = re.sub(r"\s+Property Appraiser\s*$", "", value, flags=re.IGNORECASE).strip()
+    return value
+
+
 def parse_waiting_records(section_text: str) -> list[dict]:
     if not section_text:
         return []
@@ -124,21 +144,25 @@ def parse_waiting_records(section_text: str) -> list[dict]:
             continue
 
         case_no = extract_field(block, "Case #:", labels)
-        parcel_id = extract_field(block, "Parcel ID:", labels)
+        parcel_id = clean_parcel_field(extract_field(block, "Parcel ID:", labels))
+        address = clean_address_field(extract_field(block, "Property Address:", labels))
+        final_judgment = clean_money_field(extract_field(block, "Final Judgment Amount:", labels))
+        assessed_value = clean_money_field(extract_field(block, "Assessed Value:", labels))
+        max_bid = clean_money_field(extract_field(block, "Plaintiff Max Bid:", labels))
 
         if not case_no:
             continue
 
         rows.append({
             "Auction Date": clean_text(auction_match.group("auction_date")),
-            "Property Address": extract_field(block, "Property Address:", labels),
-            "Final Judgment": extract_field(block, "Final Judgment Amount:", labels),
-            "Assessed Value": extract_field(block, "Assessed Value:", labels),
-            "Plaintiff Max Bid": extract_field(block, "Plaintiff Max Bid:", labels),
+            "Property Address": address,
+            "Final Judgment": final_judgment,
+            "Assessed Value": assessed_value,
+            "Plaintiff Max Bid": max_bid,
             "Case #": case_no,
             "Parcel ID": parcel_id,
-            "Case Link": f"{BASE_DOMAIN}/index.cfm?zaction=auction&zmethod=details&AID={quote(case_no)}&bypassPage=1",
-            "Parcel Link": f"https://pcpao.gov/Parcel-Details/{quote(parcel_id)}" if parcel_id else "",
+            "Case Link": f"{BASE_DOMAIN}/index.cfm?zaction=auction&zmethod=details&AID={quote(case_no, safe='')}&bypassPage=1",
+            "Parcel Link": f"https://pcpao.gov/Parcel-Details/{quote(parcel_id, safe='')}" if parcel_id and parcel_id.upper() != "MULTIPLE PARCELS" else "",
         })
 
     return rows
